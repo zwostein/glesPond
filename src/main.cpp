@@ -36,11 +36,20 @@
 #include "Program.hpp"
 #include "Shader.hpp"
 #include "Error.hpp"
+#ifdef GLESPOND_POINTIR
+	#include "VideoSocketClient.hpp"
+	#include "DBusClient.hpp"
+#endif
 
 
 #define SDL2_ERROR( what ) \
 	std::runtime_error( std::string(__PRETTY_FUNCTION__) + std::string(": ") + (what) + std::string(": ") + SDL_GetError() )
 
+
+#ifdef GLESPOND_POINTIR
+	static PointIR::DBusClient dbus;
+//	static PointIR::VideoSocketClient video;
+#endif
 
 static const char * vertexShaderSRC_copy =
 R"GLSL(#version 100
@@ -334,6 +343,38 @@ void render_waterModulator( float position[2], float scale )
 	glEnableVertexAttribArray( program_waterModulator_aColor );
 	glDrawArrays( GL_TRIANGLE_FAN, 0, sizeof(centeredCirclePC)/sizeof(VertexPC) );
 }
+
+
+#ifdef GLESPOND_POINTIR
+void calibrate()
+{
+	int w = 0, h = 0;
+	SDL_GetWindowSize( window, &w, &h );
+
+	ILuint image;
+	ilGenImages( 1, &image );
+	ilBindImage( image );
+	ilLoadImage( dbus.getCalibrationImageFile( w, h ).c_str() );
+	ilConvertImage( IL_RGB, IL_UNSIGNED_BYTE );
+
+	GLuint calibrationTexture;
+	glGenTextures( 1, &calibrationTexture );
+	glBindTexture( GL_TEXTURE_2D, calibrationTexture );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB, ilGetInteger( IL_IMAGE_WIDTH ), ilGetInteger( IL_IMAGE_HEIGHT ), 0, GL_RGB, GL_UNSIGNED_BYTE, (void*)ilGetData() );
+
+	ilDeleteImages( 1, &image );
+
+	// abuse waterDrawer to draw calibration texture
+	glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+	glViewport( 0, 0, w, h );
+	render_copy( calibrationTexture );
+	SDL_GL_SwapWindow( window );
+
+	dbus.calibrate();
+}
+#endif
 
 
 struct arguments
@@ -657,6 +698,11 @@ int main( int argc, char ** argv )
 				case SDLK_ESCAPE:
 					quit = true;
 					break;
+#ifdef GLESPOND_POINTIR
+				case SDLK_SPACE:
+					calibrate();
+					break;
+#endif
 				case SDLK_RETURN:
 					if( SDL_GetModState() & KMOD_ALT )
 					{

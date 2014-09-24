@@ -66,6 +66,18 @@ endif()
 ################################
 
 
+option( GLESPOND_POINTIR "Enable integrated calibration for PointIR" OFF )
+if( GLESPOND_POINTIR )
+	add_definitions( -DGLESPOND_POINTIR )
+	list( APPEND GLESPOND_SOURCES
+		src/VideoSocketClient.cpp
+		src/DBusClient.cpp
+	)
+	find_package( DBus REQUIRED )
+	include_directories( ${DBUS_INCLUDE_DIRS} )
+	list( APPEND GLESPOND_LIBRARIES ${DBUS_LIBRARIES} )
+endif()
+
 if( NOT EXISTS "${CMAKE_SOURCE_DIR}/external/SDL2/CMakeLists.txt" )
 	set( USE_SYSTEM_SDL2_DEFAULT TRUE )
 else()
