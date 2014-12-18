@@ -98,19 +98,23 @@ void Program::link()
 }
 
 
-GLint Program::getAttributeLocation( const std::string & name ) const
+GLint Program::getAttributeLocation( const std::string & name, bool mandatory ) const
 {
 	GLES2_ERROR_CHECK_UNHANDLED();
 	GLint location = glGetAttribLocation( this->id, name.c_str() );
 	GLES2_ERROR_CHECK("glGetAttribLocation");
+	if( mandatory && location == -1 )
+		throw RUNTIME_ERROR( "Attribute \"" + name + "\" not found in shader." );
 	return location;
 }
 
 
-GLint Program::getUniformLocation( const std::string & name ) const
+GLint Program::getUniformLocation( const std::string & name, bool mandatory ) const
 {
 	GLES2_ERROR_CHECK_UNHANDLED();
 	GLint location = glGetUniformLocation( this->id, name.c_str() );
 	GLES2_ERROR_CHECK("glGetUniformLocation");
+	if( mandatory && location == -1 )
+		throw RUNTIME_ERROR( "Uniform \"" + name + "\" not found in shader." );
 	return location;
 }

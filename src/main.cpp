@@ -22,7 +22,9 @@
 #include <stdexcept>
 #include <utility>
 #include <map>
+#include <vector>
 #include <cmath>
+#include <cstdlib>
 #include <unistd.h>
 
 #include <getopt.h>
@@ -32,9 +34,17 @@
 
 #include <IL/il.h>
 
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
 #include "exceptions.hpp"
 #include "Program.hpp"
 #include "Shader.hpp"
+#include "Texture2D.hpp"
+#include "FrameBuffer2D.hpp"
 #include "Error.hpp"
 #ifdef GLESPOND_POINTIR
 	#include "VideoSocketClient.hpp"
@@ -50,6 +60,10 @@
 	static PointIR::DBusClient dbus;
 //	static PointIR::VideoSocketClient video;
 #endif
+
+
+constexpr const double PI = 4 * std::atan(1);
+
 
 static const char * vertexShaderSRC_copy =
 R"GLSL(#version 100
@@ -206,6 +220,39 @@ void main()
 )GLSL";
 
 
+static const char * vertexShaderSRC_fish =
+R"GLSL(#version 100
+varying vec2 vTexCoord;
+
+attribute vec2 aPosition;
+attribute vec2 aTexCoord;
+
+uniform mat4 uMatrix;
+
+void main()
+{
+	gl_Position = uMatrix * vec4( aPosition, 0.0, 1.0 );
+	vTexCoord = aTexCoord;
+}
+)GLSL";
+
+
+static const char * fragmentShaderSRC_fish =
+R"GLSL(#version 100
+varying lowp vec2 vTexCoord;
+
+uniform sampler2D uTexture;
+uniform lowp vec3 uPhaseFreqAmp;
+
+void main()
+{
+	lowp vec2 coord = vTexCoord;
+	coord.s += uPhaseFreqAmp.z * (1.0-coord.t)* (1.0-coord.t) * sin( uPhaseFreqAmp.x + coord.t * uPhaseFreqAmp.y );
+	gl_FragColor = texture2D( uTexture, coord );
+}
+)GLSL";
+
+
 struct VertexPT
 {
 	float position[2];
@@ -240,6 +287,23 @@ struct Touch
 std::map< int64_t, Touch > touches;
 
 
+struct Fish
+{
+	float position[2] = { 0.0f, 0.0f };
+	float rotation = 0.0f;
+	float scale = 0.075f;
+	float phase = 0.0f;
+	float agility = 0.004f;
+	float speed = 0.0006f;
+	float maxSpeed = 0.005f;
+	float minSpeed = 0.0005f;
+	float rotationSpeed = 0.0f;
+	float rotationMaxSpeed = 0.1f;
+	float sensitivityDistance = 0.5f;
+};
+std::vector< Fish > fish;
+
+
 SDL_Window * window = nullptr;
 SDL_GLContext glContext = nullptr;
 
@@ -266,19 +330,36 @@ GLint program_copy_aPosition;
 GLint program_copy_aTexCoord;
 GLint program_copy_uTexture;
 
+Program program_fish;
+GLint program_fish_aPosition;
+GLint program_fish_aTexCoord;
+GLint program_fish_uTexture;
+GLint program_fish_uMatrix;
+GLint program_fish_uPhaseFreqAmp;
+
 GLuint vertexBufferCenteredQuadPT;
 GLuint vertexBufferCenteredCirclePC;
-GLuint frameBuffer[2];
-GLuint texture[2];
-GLuint backgroundTexture;
+
+FrameBuffer2D * waterFrameBufferSrc = nullptr;
+FrameBuffer2D * waterFrameBufferDst = nullptr;
+FrameBuffer2D * backgroundFrameBuffer = nullptr;
+
+Texture2D * backgroundTexture = nullptr;
+Texture2D * fishTexture = nullptr;
 
 
-void render_water( GLuint sourceTexture, unsigned int width, unsigned int height )
+float randf()
+{
+	return (float)rand() / (float)RAND_MAX;
+}
+
+
+void render_water( const Texture2D * sourceTexture, unsigned int width, unsigned int height )
 {
 	program_water.use();
 	glUniform2f( program_water_uDeltaPixel, 1.0/width, 1.0/height );
 	glUniform1i( program_water_uTexture, 0 );
-	glBindTexture( GL_TEXTURE_2D, sourceTexture );
+	sourceTexture->bind( 0 );
 
 	glBindBuffer( GL_ARRAY_BUFFER, vertexBufferCenteredQuadPT );
 	glVertexAttribPointer( program_water_aPosition, 2, GL_FLOAT, GL_FALSE, sizeof(VertexPT), (void*)offsetof(VertexPT,position) );
@@ -289,16 +370,13 @@ void render_water( GLuint sourceTexture, unsigned int width, unsigned int height
 }
 
 
-void render_waterDrawer( GLuint waterTexture, GLuint backgroundTexture )
+void render_waterDrawer( const Texture2D * waterTexture, const Texture2D * backgroundTexture )
 {
 	program_waterDrawer.use();
-
-	glActiveTexture( GL_TEXTURE0 );
-	glUniform1i( program_waterDrawer_uWaterTexture, 0 );
-	glBindTexture( GL_TEXTURE_2D, waterTexture );
-	glActiveTexture( GL_TEXTURE1 );
 	glUniform1i( program_waterDrawer_uBackgroundTexture, 1);
-	glBindTexture( GL_TEXTURE_2D, backgroundTexture );
+	backgroundTexture->bind( 1 );
+	glUniform1i( program_waterDrawer_uWaterTexture, 0 );
+	waterTexture->bind( 0 );
 
 	glBindBuffer( GL_ARRAY_BUFFER, vertexBufferCenteredQuadPT );
 	glVertexAttribPointer( program_waterDrawer_aPosition, 2, GL_FLOAT, GL_FALSE, sizeof(VertexPT), (void*)offsetof(VertexPT,position) );
@@ -306,18 +384,14 @@ void render_waterDrawer( GLuint waterTexture, GLuint backgroundTexture )
 	glEnableVertexAttribArray( program_waterDrawer_aPosition );
 	glEnableVertexAttribArray( program_waterDrawer_aTexCoord );
 	glDrawArrays( GL_TRIANGLE_STRIP, 0, sizeof(centeredQuadPT)/sizeof(VertexPT) );
-
-	glActiveTexture( GL_TEXTURE0 );
 }
 
 
-void render_copy( GLuint texture )
+void render_copy( const Texture2D * texture )
 {
 	program_copy.use();
-
-	glActiveTexture( GL_TEXTURE0 );
 	glUniform1i( program_copy_uTexture, 0 );
-	glBindTexture( GL_TEXTURE_2D, texture );
+	texture->bind( 0 );
 
 	glBindBuffer( GL_ARRAY_BUFFER, vertexBufferCenteredQuadPT );
 	glVertexAttribPointer( program_copy_aPosition, 2, GL_FLOAT, GL_FALSE, sizeof(VertexPT), (void*)offsetof(VertexPT,position) );
@@ -325,12 +399,10 @@ void render_copy( GLuint texture )
 	glEnableVertexAttribArray( program_copy_aPosition );
 	glEnableVertexAttribArray( program_copy_aTexCoord );
 	glDrawArrays( GL_TRIANGLE_STRIP, 0, sizeof(centeredQuadPT)/sizeof(VertexPT) );
-
-	glActiveTexture( GL_TEXTURE0 );
 }
 
 
-void render_waterModulator( float position[2], float scale )
+void render_waterModulator( const float position[2], float scale )
 {
 	program_waterModulator.use();
 	glUniform2fv( program_waterModulator_uPosition, 1, position );
@@ -345,31 +417,111 @@ void render_waterModulator( float position[2], float scale )
 }
 
 
+void render_fish( const std::vector<Fish> & fish )
+{
+	static float freq = 4.0f;
+
+	static float amp = 0.2f;
+
+	glEnable( GL_BLEND );
+	glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
+
+	program_fish.use();
+	glUniform1i( program_fish_uTexture, 0 );
+	fishTexture->bind( 0 );
+
+
+	glBindBuffer( GL_ARRAY_BUFFER, vertexBufferCenteredQuadPT );
+	glVertexAttribPointer( program_fish_aPosition, 2, GL_FLOAT, GL_FALSE, sizeof(VertexPT), (void*)offsetof(VertexPT,position) );
+	glVertexAttribPointer( program_fish_aTexCoord, 2, GL_FLOAT, GL_FALSE, sizeof(VertexPT), (void*)offsetof(VertexPT,texCoord) );
+	glEnableVertexAttribArray( program_fish_aPosition );
+	glEnableVertexAttribArray( program_fish_aTexCoord );
+
+	for( const auto & f : fish )
+	{
+		glm::mat4 matrix;
+		matrix = glm::translate( matrix, glm::vec3(f.position[0],f.position[1],0.0f) );
+		matrix = glm::rotate( matrix, f.rotation, glm::vec3(0.0f,0.0f,1.0f) );
+		matrix = glm::scale( matrix, glm::vec3(f.scale,f.scale,f.scale) );
+
+		glUniform3f( program_fish_uPhaseFreqAmp, f.phase, freq, amp );
+		glUniformMatrix4fv( program_fish_uMatrix, 1, false, glm::value_ptr(matrix) );
+
+		glDrawArrays( GL_TRIANGLE_STRIP, 0, sizeof(centeredQuadPT)/sizeof(VertexPT) );
+	}
+
+	glDisable( GL_BLEND );
+}
+
+
+void update_fish( std::vector<Fish> & fish, const std::map< int64_t, Touch > & touches )
+{
+	for( auto & f : fish )
+	{
+		float nearestDistance = std::numeric_limits< float >::max();
+		const Touch * nearest = nullptr;
+		for( const auto & t : touches )
+		{
+			float dx = t.second.point[0] - f.position[0];
+			float dy = t.second.point[1] - f.position[1];
+			float distance = dx*dx + dy*dy;
+			if( distance < nearestDistance && distance < f.sensitivityDistance )
+			{
+				nearestDistance = distance;
+				nearest = &t.second;
+			}
+		}
+
+		glm::vec2 perp( cos(f.rotation), sin(f.rotation) );
+		glm::vec2 head( cos(f.rotation+PI/2.0f), sin(f.rotation+PI/2.0f) );
+		glm::vec2 toCenter( -f.position[0], -f.position[1] );
+		toCenter = glm::normalize( toCenter );
+
+		if( nearest )
+		{
+			float diff = f.maxSpeed - f.speed;
+			f.speed += f.agility * diff;
+
+			glm::vec2 toTouch( nearest->point[0] - f.position[0], nearest->point[1] - f.position[1] );
+			toTouch = glm::normalize( toTouch );
+			float dot = glm::dot( perp, toTouch );
+			f.rotationSpeed -= f.agility * dot;
+
+		}
+		else
+		{
+			float diff = f.speed - f.minSpeed;
+			f.speed -= f.agility * diff;
+
+			float dot = glm::dot( perp, toCenter );
+			f.rotationSpeed -= 0.1f * f.agility * dot;
+		}
+
+		if( f.rotationSpeed > f.rotationMaxSpeed )
+			f.rotationSpeed = f.rotationMaxSpeed;
+		else if( f.rotationSpeed < -f.rotationMaxSpeed )
+			f.rotationSpeed = -f.rotationMaxSpeed;
+
+		f.phase += 5.0f * ((f.speed)/f.scale);
+		f.position[0] += head.x * f.speed;
+		f.position[1] += head.y * f.speed;
+		f.rotation += f.rotationSpeed;
+		f.rotationSpeed -= 10.0f * f.agility * f.rotationSpeed;
+	}
+}
+
+
 #ifdef GLESPOND_POINTIR
 void calibrate()
 {
 	int w = 0, h = 0;
 	SDL_GetWindowSize( window, &w, &h );
 
-	ILuint image;
-	ilGenImages( 1, &image );
-	ilBindImage( image );
-	ilLoadImage( dbus.getCalibrationImageFile( w, h ).c_str() );
-	ilConvertImage( IL_RGB, IL_UNSIGNED_BYTE );
+	Texture2D calibrationTexture( dbus.getCalibrationImageFile( w, h ) );
 
-	GLuint calibrationTexture;
-	glGenTextures( 1, &calibrationTexture );
-	glBindTexture( GL_TEXTURE_2D, calibrationTexture );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB, ilGetInteger( IL_IMAGE_WIDTH ), ilGetInteger( IL_IMAGE_HEIGHT ), 0, GL_RGB, GL_UNSIGNED_BYTE, (void*)ilGetData() );
-
-	ilDeleteImages( 1, &image );
-
-	// abuse waterDrawer to draw calibration texture
 	glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 	glViewport( 0, 0, w, h );
-	render_copy( calibrationTexture );
+	render_copy( &calibrationTexture );
 	SDL_GL_SwapWindow( window );
 
 	dbus.calibrate();
@@ -380,7 +532,9 @@ void calibrate()
 struct arguments
 {
 	std::string backgroundImageFile;
-	unsigned int waterResolution;
+	std::string fishTexture;
+	unsigned int waterResolutionDivider = 4;
+	unsigned int numberOfFish = 0;
 };
 
 
@@ -388,7 +542,7 @@ void print_usage( int argc, char ** argv )
 {
 	printf
 	(
-		"Usage: %s [-r=int] [--resolution=int] <background image file>\n",
+		"Usage: %s [--waterResolutionDivider=int] [--numberOfFish=int] [--fishTexture=string] <background image file>\n",
 		argv[0]
 	);
 }
@@ -399,22 +553,29 @@ int main( int argc, char ** argv )
 	////////////////////////////////
 	// argument parsing
 	struct arguments arguments;
-	arguments.waterResolution = 256;
 
 	static struct option long_options[] =
 	{
-		{ "resolution",  required_argument, 0, 'r' },
-		{ 0,         0,                     0, 0   }
+		{ "waterResolutionDivider", required_argument, 0, 'd' },
+		{ "numberOfFish",           required_argument, 0, 'f' },
+		{ "fishTexture",            required_argument, 0, 't' },
+		{ 0,           0,                              0, 0   }
 	};
 
 	int opt = 0;
 	int option_index = 0;
-	while( ( opt = getopt_long( argc, argv, "r:", long_options, &option_index ) ) != -1 )
+	while( ( opt = getopt_long( argc, argv, "d:f:t:", long_options, &option_index ) ) != -1 )
 	{
 		switch( opt )
 		{
-		case 'r':
-			arguments.waterResolution = strtoul( optarg, NULL, 10 );
+		case 'd':
+			arguments.waterResolutionDivider = strtoul( optarg, NULL, 10 );
+			break;
+		case 'f':
+			arguments.numberOfFish = strtoul( optarg, NULL, 10 );
+			break;
+		case 't':
+			arguments.fishTexture = optarg;
 			break;
 		default:
 			print_usage( argc, argv );
@@ -431,6 +592,13 @@ int main( int argc, char ** argv )
 	else
 	{
 		arguments.backgroundImageFile = argv[optind++];
+	}
+
+	if( arguments.fishTexture.empty() && arguments.numberOfFish > 0 )
+	{
+		fprintf( stderr, "Need a fish texture!\n" );
+		print_usage( argc, argv );
+		return EXIT_FAILURE;
 	}
 	////////////////////////////////
 
@@ -458,8 +626,8 @@ int main( int argc, char ** argv )
 		"glesPond",             // window title
 		SDL_WINDOWPOS_CENTERED, // the x position of the window
 		SDL_WINDOWPOS_CENTERED, // the y position of the window
-		arguments.waterResolution, arguments.waterResolution, // window width and height
-		SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL
+		640, 640, // window width and height
+		SDL_WINDOW_MAXIMIZED | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL
 	);
 	if( !window )
 		throw SDL2_ERROR( "Could not create window" );
@@ -517,115 +685,72 @@ int main( int argc, char ** argv )
 	program_waterDrawer.attach( Shader( GL_FRAGMENT_SHADER, fragmentShaderSRC_waterDrawer ) );
 	program_waterDrawer.link();
 	program_waterDrawer_aPosition = program_waterDrawer.getAttributeLocation( "aPosition" );
-	if( program_waterDrawer_aPosition == -1 )
-		throw RUNTIME_ERROR( "Attribute aPosition not found in shader!" );
 	program_waterDrawer_aTexCoord = program_waterDrawer.getAttributeLocation( "aTexCoord" );
-	if( program_waterDrawer_aTexCoord == -1 )
-		throw RUNTIME_ERROR( "Attribute aTexCoord not found in shader!" );
 	program_waterDrawer_uWaterTexture = program_waterDrawer.getUniformLocation( "uWaterTexture" );
-	if( program_waterDrawer_uWaterTexture == -1 )
-		throw RUNTIME_ERROR( "Uniform uWaterTexture not found in shader!" );
 	program_waterDrawer_uBackgroundTexture = program_waterDrawer.getUniformLocation( "uBackgroundTexture" );
-	if( program_waterDrawer_uBackgroundTexture == -1 )
-		throw RUNTIME_ERROR( "Uniform uBackgroundTexture not found in shader!" );
 
 	program_water.create();
 	program_water.attach( Shader( GL_VERTEX_SHADER, vertexShaderSRC_water ) );
 	program_water.attach( Shader( GL_FRAGMENT_SHADER, fragmentShaderSRC_water ) );
 	program_water.link();
 	program_water_aPosition = program_water.getAttributeLocation( "aPosition" );
-	if( program_water_aPosition == -1 )
-		throw RUNTIME_ERROR( "Attribute aPosition not found in shader!" );
 	program_water_aTexCoord = program_water.getAttributeLocation( "aTexCoord" );
-	if( program_water_aTexCoord == -1 )
-		throw RUNTIME_ERROR( "Attribute aTexCoord not found in shader!" );
 	program_water_uTexture = program_water.getUniformLocation( "uTexture" );
-	if( program_water_uTexture == -1 )
-		throw RUNTIME_ERROR( "Uniform uTexture not found in shader!" );
 	program_water_uDeltaPixel = program_water.getUniformLocation( "uDeltaPixel" );
-	if( program_water_uDeltaPixel == -1 )
-		throw RUNTIME_ERROR( "Uniform uDeltaPixel not found in shader!" );
 
 	program_waterModulator.create();
 	program_waterModulator.attach( Shader( GL_VERTEX_SHADER, vertexShaderSRC_waterModulator ) );
 	program_waterModulator.attach( Shader( GL_FRAGMENT_SHADER, fragmentShaderSRC_waterModulator ) );
 	program_waterModulator.link();
 	program_waterModulator_aPosition = program_waterModulator.getAttributeLocation( "aPosition" );
-	if( program_waterModulator_aPosition == -1 )
-		throw RUNTIME_ERROR( "Attribute aPosition not found in shader!" );
 	program_waterModulator_aColor = program_waterModulator.getAttributeLocation( "aColor" );
-	if( program_waterModulator_aColor == -1 )
-		throw RUNTIME_ERROR( "Attribute aColor not found in shader!" );
 	program_waterModulator_uPosition = program_waterModulator.getUniformLocation( "uPosition" );
-	if( program_waterModulator_uPosition == -1 )
-		throw RUNTIME_ERROR( "Uniform uPosition not found in shader!" );
 	program_waterModulator_uScale = program_waterModulator.getUniformLocation( "uScale" );
-	if( program_waterModulator_uScale == -1 )
-		throw RUNTIME_ERROR( "Uniform uScale not found in shader!" );
 
 	program_copy.create();
 	program_copy.attach( Shader( GL_VERTEX_SHADER, vertexShaderSRC_copy ) );
 	program_copy.attach( Shader( GL_FRAGMENT_SHADER, fragmentShaderSRC_copy ) );
 	program_copy.link();
 	program_copy_aPosition = program_copy.getAttributeLocation( "aPosition" );
-	if( program_copy_aPosition == -1 )
-		throw RUNTIME_ERROR( "Attribute aPosition not found in shader!" );
 	program_copy_aTexCoord = program_copy.getAttributeLocation( "aTexCoord" );
-	if( program_copy_aTexCoord == -1 )
-		throw RUNTIME_ERROR( "Attribute aTexCoord not found in shader!" );
 	program_copy_uTexture = program_copy.getUniformLocation( "uTexture" );
-	if( program_copy_uTexture == -1 )
-		throw RUNTIME_ERROR( "Uniform uTexture not found in shader!" );
+
+	program_fish.create();
+	program_fish.attach( Shader( GL_VERTEX_SHADER, vertexShaderSRC_fish ) );
+	program_fish.attach( Shader( GL_FRAGMENT_SHADER, fragmentShaderSRC_fish ) );
+	program_fish.link();
+	program_fish_aPosition = program_fish.getAttributeLocation( "aPosition" );
+	program_fish_aTexCoord = program_fish.getAttributeLocation( "aTexCoord" );
+	program_fish_uTexture = program_fish.getUniformLocation( "uTexture" );
+	program_fish_uMatrix = program_fish.getUniformLocation( "uMatrix" );
+	program_fish_uPhaseFreqAmp = program_fish.getUniformLocation( "uPhaseFreqAmp" );
 	////////////////////////////////
 
 	////////////////////////////////
-	// Framebuffer Textures
-	glGenFramebuffers( 2, frameBuffer );
-	glGenTextures( 2, texture );
-	glClearColor( 0.5f, 0.5f, 0.5f, 0.5f );
-
-	glBindTexture( GL_TEXTURE_2D, texture[0] );
-	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, arguments.waterResolution, arguments.waterResolution, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0 );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
-	glTexParameteri( GL_TEXTURE_2D,  GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
-	glTexParameteri( GL_TEXTURE_2D,  GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
-	glBindFramebuffer( GL_FRAMEBUFFER, frameBuffer[0] );
-	glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture[0], 0 );
-	if( glCheckFramebufferStatus( GL_FRAMEBUFFER ) != GL_FRAMEBUFFER_COMPLETE )
-		throw RUNTIME_ERROR( "Framebuffer is not complete!" );
-	glClear( GL_COLOR_BUFFER_BIT );
-
-	glBindTexture( GL_TEXTURE_2D, texture[1] );
-	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, arguments.waterResolution, arguments.waterResolution, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0 );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
-	glTexParameteri( GL_TEXTURE_2D,  GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
-	glTexParameteri( GL_TEXTURE_2D,  GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
-	glBindFramebuffer( GL_FRAMEBUFFER, frameBuffer[1] );
-	glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture[1], 0 );
-	if( glCheckFramebufferStatus( GL_FRAMEBUFFER ) != GL_FRAMEBUFFER_COMPLETE )
-		throw RUNTIME_ERROR( "Framebuffer is not complete!" );
-	glClear( GL_COLOR_BUFFER_BIT );
-
-	glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+	// Textures and FrameBuffers
+	fishTexture = new Texture2D( arguments.fishTexture );
+	backgroundTexture = new Texture2D( arguments.backgroundImageFile );
+	backgroundFrameBuffer = new FrameBuffer2D( backgroundTexture->getWidth(), backgroundTexture->getHeight(), GL_RGBA );
+	waterFrameBufferDst = new FrameBuffer2D( backgroundTexture->getWidth()/arguments.waterResolutionDivider, backgroundTexture->getHeight()/arguments.waterResolutionDivider, GL_RGBA );
+	waterFrameBufferSrc = new FrameBuffer2D( backgroundTexture->getWidth()/arguments.waterResolutionDivider, backgroundTexture->getHeight()/arguments.waterResolutionDivider, GL_RGBA );
 	////////////////////////////////
 
 	////////////////////////////////
-	// Textures
-	ILuint image;
-	ilGenImages( 1, &image );
-	ilBindImage( image );
-	ilLoadImage( arguments.backgroundImageFile.c_str() );
-	ilConvertImage( IL_RGB, IL_UNSIGNED_BYTE );
-
-	glGenTextures( 1, &backgroundTexture );
-	glBindTexture( GL_TEXTURE_2D, backgroundTexture );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGB, ilGetInteger( IL_IMAGE_WIDTH ), ilGetInteger( IL_IMAGE_HEIGHT ), 0, GL_RGB, GL_UNSIGNED_BYTE, (void*)ilGetData() );
-
-	ilDeleteImages( 1, &image );
+	// Initialize fish
+	for( unsigned int i = 0; i < arguments.numberOfFish; i++ )
+	{
+		Fish f;
+		f.position[0] = randf() * 2.0f - 1.0f;
+		f.position[1] = randf() * 2.0f - 1.0f;
+		f.rotation = randf() * 2.0f * PI;
+		f.scale = randf() * 0.02f + 0.08f;
+		f.agility = randf() * 0.005f + 0.001f;
+		f.minSpeed = randf() * 0.001f + 0.0005f;
+		f.maxSpeed = randf() * 0.01f + 0.004f;
+		f.rotationMaxSpeed = randf() * 0.4f + 0.1f;
+		f.sensitivityDistance = randf() * 0.4f + 0.1f;
+		fish.push_back( f );
+	}
 	////////////////////////////////
 
 	bool quit = false;
@@ -725,23 +850,26 @@ int main( int argc, char ** argv )
 			}
 		}
 
-		glBindFramebuffer( GL_FRAMEBUFFER, frameBuffer[1] );
-		glViewport( 0, 0, arguments.waterResolution, arguments.waterResolution );
-		for( auto t : touches )
+		waterFrameBufferSrc->bind();
+		for( const auto & t : touches )
 		{
 			render_waterModulator( t.second.point, 0.03f );
 		}
 
-		glBindFramebuffer( GL_FRAMEBUFFER, frameBuffer[0] );
-		glViewport( 0, 0, arguments.waterResolution, arguments.waterResolution );
-		render_water( texture[1], arguments.waterResolution, arguments.waterResolution );
+		waterFrameBufferDst->bind();
+		render_water( waterFrameBufferSrc->getTexture(), waterFrameBufferSrc->getTexture()->getWidth(), waterFrameBufferSrc->getTexture()->getHeight() );
+
+		backgroundFrameBuffer->bind();
+		render_copy( backgroundTexture );
+		update_fish( fish, touches );
+		render_fish( fish );
 
 		glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 		glViewport( 0, 0, w, h );
-		render_waterDrawer( texture[0], backgroundTexture );
+		render_waterDrawer( waterFrameBufferDst->getTexture(), backgroundFrameBuffer->getTexture() );
 
-		std::swap( texture[0], texture[1] );
-		std::swap( frameBuffer[0], frameBuffer[1] );
+		std::swap( waterFrameBufferSrc, waterFrameBufferDst );
+
 		SDL_GL_SwapWindow( window );
 	}
 

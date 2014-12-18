@@ -17,6 +17,8 @@ set( GLESPOND_SOURCES
 	src/Shader.cpp
 	src/Program.cpp
 	src/Error.cpp
+	src/Texture2D.cpp
+	src/FrameBuffer2D.cpp
 )
 
 
@@ -108,6 +110,16 @@ else()
 	find_package( OpenGLES2 REQUIRED )
 	include_directories( ${OPENGLES2_INCLUDE_DIR} )
 	list( APPEND GLESPOND_LIBRARIES ${OPENGLES2_LIBRARY} )
+endif()
+
+if( NOT EXISTS "${CMAKE_SOURCE_DIR}/external/glm/CMakeLists.txt" )
+	set( USE_SYSTEM_GLM_DEFAULT TRUE )
+else()
+	message( STATUS "Found local GLM in external/glm - Defaulting to NOT use system installation." )
+endif()
+option( USE_SYSTEM_GLM "Use system GLM installation" ${USE_SYSTEM_GLM_DEFAULT} )
+if( NOT USE_SYSTEM_GLM )
+	include_directories( "${CMAKE_SOURCE_DIR}/external/glm/" )
 endif()
 
 find_package( DevIL REQUIRED )

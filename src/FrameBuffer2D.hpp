@@ -17,11 +17,10 @@
  * along with glesPond.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _PROGRAM_INCLUDED_
-#define _PROGRAM_INCLUDED_
+#ifndef _FRAMEBUFFER2D_INCLUDED_
+#define _FRAMEBUFFER2D_INCLUDED_
 
 
-#include "Shader.hpp"
 #include "Error.hpp"
 
 #include <string>
@@ -29,31 +28,54 @@
 #include <GLES2/gl2.h>
 
 
-class Program
+class Texture2D;
+
+
+class FrameBuffer2D
 {
 public:
-	Program( const Program & ) = delete;
-	Program & operator=( const Program & ) = delete;
+	FrameBuffer2D( const FrameBuffer2D & ) = delete;
+	FrameBuffer2D & operator=( const FrameBuffer2D & ) = delete;
 
-	Program();
-	virtual ~Program();
 
-	void create();
-	void attach( const Shader & shader );
-	void link();
+	FrameBuffer2D( unsigned int width, unsigned int height, GLint internalFormat );
 
-	GLint getAttributeLocation( const std::string & name, bool mandatory = true ) const;
-	GLint getUniformLocation( const std::string & name, bool mandatory = true ) const;
+	virtual ~FrameBuffer2D();
 
-	void use() const
+	void bind() const
 	{
 		GLES2_ERROR_CHECK_UNHANDLED();
-		glUseProgram( this->id );
-		GLES2_ERROR_CHECK("glUseProgram");
+		glViewport( 0, 0, this->width, this->height );
+		GLES2_ERROR_CHECK("glViewport");
+		glBindFramebuffer( GL_FRAMEBUFFER, this->id );
+		GLES2_ERROR_CHECK("glBindFramebuffer");
+	}
+
+	const GLuint & getID() const
+	{
+		return this->id;
+	}
+
+	const Texture2D * getTexture() const
+	{
+		return this->texture;
+	}
+
+	const GLuint & getWidth() const
+	{
+		return this->width;
+	}
+
+	const GLuint & getHeight() const
+	{
+		return this->height;
 	}
 
 private:
 	GLuint id = 0;
+	Texture2D * texture;
+	unsigned int width = 0;
+	unsigned int height = 0;
 };
 
 
