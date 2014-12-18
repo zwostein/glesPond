@@ -862,8 +862,11 @@ int main( int argc, char ** argv )
 
 		backgroundFrameBuffer->bind();
 		render_copy( backgroundTexture );
-		update_fish( fish, touches );
-		render_fish( fish );
+		if( arguments.numberOfFish )
+		{
+			update_fish( fish, touches );
+			render_fish( fish );
+		}
 
 		glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 		glViewport( 0, 0, w, h );
@@ -874,6 +877,11 @@ int main( int argc, char ** argv )
 		SDL_GL_SwapWindow( window );
 	}
 
+	delete waterFrameBufferSrc;
+	delete waterFrameBufferDst;
+	delete backgroundFrameBuffer;
+	delete backgroundTexture;
+	delete fishTexture;
 	SDL_Quit();
 
 	return 0;
