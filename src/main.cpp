@@ -728,7 +728,8 @@ int main( int argc, char ** argv )
 
 	////////////////////////////////
 	// Textures and FrameBuffers
-	fishTexture = new Texture2D( arguments.fishTexture );
+	if( arguments.numberOfFish )
+		fishTexture = new Texture2D( arguments.fishTexture );
 	backgroundTexture = new Texture2D( arguments.backgroundImageFile );
 	backgroundFrameBuffer = new FrameBuffer2D( backgroundTexture->getWidth(), backgroundTexture->getHeight(), GL_RGBA );
 	waterFrameBufferDst = new FrameBuffer2D( backgroundTexture->getWidth()/arguments.waterResolutionDivider, backgroundTexture->getHeight()/arguments.waterResolutionDivider, GL_RGBA );
